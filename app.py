@@ -29,7 +29,8 @@ CORS(app, resources={r"/*": {"origins": "*"}})  # Apply to all routes
 # app_settings.sandbox_server_url = os.getenv('app_settings.sandbox_server_url', 'http://localhost:5001')
 
 client = MongoClient(app_settings.mongodb_uri)
-db = client.digital_agriculture
+# Use the database named in MONGODB_URI (as the deployed pods do), else digital_agriculture.
+db = client.get_default_database(default="digital_agriculture")
 messages_collection = db["messages"]
 
 
