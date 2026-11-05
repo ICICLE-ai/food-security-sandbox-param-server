@@ -1,6 +1,9 @@
 import datetime
 import json
 import logging
+import os
+import signal
+import sys
 import threading
 import time
 import traceback
@@ -31,12 +34,11 @@ messages_collection = db["messages"]
 
 
 def get_username(token):
-    headers = {"Content-Type": "text/html"}
     # call the userinfo endpoint
     url = f"{app_settings.tapis_base_url}/v3/oauth2/userinfo"
     headers = {"X-Tapis-Token": token}
     try:
-        rsp = requests.get(url, headers=headers)
+        rsp = requests.get(url, headers=headers, timeout=30)
         rsp.raise_for_status()
         username = rsp.json()["result"]["username"]
     except Exception as e:
@@ -56,7 +58,7 @@ def convert_numpy_to_list(obj):
 
 
 def send_request_to_train_local_model(
-    token, user_id, metadata, updates_list, hyperparameters, lock
+    token, user_id, metadata, model_id, updates_list, hyperparameters, lock
 ):
     try:
         headers = {
@@ -69,6 +71,7 @@ def send_request_to_train_local_model(
             json={
                 "userID": str(user_id),
                 "metadata": metadata,
+                "model_id": model_id,
                 "hyperparameters": hyperparameters,
             },
         )
@@ -155,6 +158,7 @@ def start_training_process(collaborators, metadata, model_id, hyperparameters, t
                     token,
                     collaborator_id,
                     metadata,
+                    model_id,
                     client_updates,
                     hyperparameters,
                     lock,
@@ -233,7 +237,21 @@ def start_training_process(collaborators, metadata, model_id, hyperparameters, t
 
 @app.route("/api/health", methods=["GET"])
 def health_check():
-    return jsonify({"status": "healthy", "service": "app-server"})
+    return jsonify({"status": "healthy", "service": "param-server"})
+
+
+# ICICLE CI rollout check: must stay outside /api and report the image's BUILD_SHA.
+@app.route("/health", methods=["GET"])
+def build_health():
+    response = jsonify(
+        {
+            "status": "ok",
+            "build_sha": os.getenv("BUILD_SHA", "unknown"),
+            "version": os.getenv("BUILD_VERSION", "unknown"),
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/api/start_training", methods=["POST"])
@@ -287,43 +305,7 @@ def train():
         ), 500
 
 
-@app.route("/api/test", methods=["GET"])
-def test():
-    # Find all messages where user is either sender or receiver
-    messages = db["messages"].find(
-        {"$or": [{"senderID": "osamazafar98"}, {"receiverID": "osamazafar98"}]}
-    )
-
-    # Create a dictionary to store latest message timestamp for each partner
-    conversation_partners = {}
-    for message in messages:
-        partner_id = (
-            message["receiverID"]
-            if message["senderID"] == "osamazafar98"
-            else message["senderID"]
-        )
-        timestamp = message.get("timestamp")
-
-        # Update timestamp only if it's more recent
-        if (
-            partner_id not in conversation_partners
-            or timestamp > conversation_partners[partner_id]["timestamp"]
-        ):
-            conversation_partners[partner_id] = {
-                "partner_id": partner_id,
-                "timestamp": timestamp,
-                "last_message": message.get("content", ""),
-            }
-    print(list(messages))
-    # Convert to list and sort by timestamp
-    sorted_partners = sorted(
-        conversation_partners.values(),
-        key=lambda x: x["timestamp"],
-        reverse=True,  # Most recent first
-    )
-
-    return jsonify(sorted_partners), 200
-
-
 if __name__ == "__main__":
+    # Exit cleanly on SIGTERM: as PID 1 in the pod the default action is to ignore it.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     app.run(host=app_settings.host, port=app_settings.port, debug=app_settings.debug)
